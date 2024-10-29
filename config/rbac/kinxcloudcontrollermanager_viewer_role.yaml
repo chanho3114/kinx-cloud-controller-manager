@@ -1,0 +1,27 @@
+# permissions for end users to view kinxcloudcontrollermanagers.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: clusterrole
+    app.kubernetes.io/instance: kinxcloudcontrollermanager-viewer-role
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/created-by: kinx-cloud-controller-manager
+    app.kubernetes.io/part-of: kinx-cloud-controller-manager
+    app.kubernetes.io/managed-by: kustomize
+  name: kinxcloudcontrollermanager-viewer-role
+rules:
+- apiGroups:
+  - crd.kinx.net
+  resources:
+  - kinxcloudcontrollermanagers
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - crd.kinx.net
+  resources:
+  - kinxcloudcontrollermanagers/status
+  verbs:
+  - get

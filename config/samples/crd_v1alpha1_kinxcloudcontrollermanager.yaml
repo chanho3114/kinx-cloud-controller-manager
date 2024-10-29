@@ -1,0 +1,12 @@
+apiVersion: crd.kinx.net/v1alpha1
+kind: KinxCloudControllerManager
+metadata:
+  labels:
+    app.kubernetes.io/name: kinxcloudcontrollermanager
+    app.kubernetes.io/instance: kinxcloudcontrollermanager-sample
+    app.kubernetes.io/part-of: kinx-cloud-controller-manager
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/created-by: kinx-cloud-controller-manager
+  name: kinxcloudcontrollermanager-sample
+spec:
+  # TODO(user): Add fields here
