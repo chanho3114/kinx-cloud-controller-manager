@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"reflect"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -90,7 +91,15 @@ func (r *KinxCloudControllerManagerReconciler) Reconcile(ctx context.Context, re
 		return r.reconcileDelete(ctx, ccm)
 	}
 
-	// log.Info("KinxCloudControllerManager 생성")
+	defer func() (ctrl.Result, error) {
+		log.Info("Status Reconcile")
+		err := r.reconcileStatus(ctx, ccm)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+
+		return ctrl.Result{}, nil
+	}()
 
 	log.Info("Secret Reconcile")
 	err := r.reconcileSecret(ctx, ccm)
@@ -132,7 +141,7 @@ func (r *KinxCloudControllerManagerReconciler) Reconcile(ctx context.Context, re
 }
 
 func (r *KinxCloudControllerManagerReconciler) reconcileDelete(ctx context.Context, ccm *crdv1alpha1.KinxCloudControllerManager) (ctrl.Result, error) {
-	log := r.Log.WithValues("Delete", ccm.Namespace, ccm.Name)
+	log := r.Log.WithValues("Delete Reconcile", ccm.Namespace, ccm.Name)
 	log.Info("removing application")
 
 	controllerutil.RemoveFinalizer(ccm, kccmFinalizer)
@@ -468,7 +477,7 @@ func (r *KinxCloudControllerManagerReconciler) reconcileDeployment(ctx context.C
 		or.Controller = boolPtr(true)
 	})
 
-	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, deployment, func() error {
+	result, err := controllerutil.CreateOrPatch(ctx, r.Client, deployment, func() error {
 		return nil
 	})
 
@@ -482,12 +491,22 @@ func (r *KinxCloudControllerManagerReconciler) reconcileDeployment(ctx context.C
 }
 
 func (r *KinxCloudControllerManagerReconciler) reconcileStatus(ctx context.Context, ccm *crdv1alpha1.KinxCloudControllerManager) error {
-	// log := r.Log.WithValues("Status", ccm.Namespace, ccm.Name)
+	log := r.Log.WithValues("Status", ccm.Namespace, ccm.Name)
 
 	dep := &appsv1.Deployment{}
 
 	if err := r.Get(ctx, types.NamespacedName{Namespace: ccm.Namespace, Name: ccm.Spec.ClusterName + "cloud-controller-manager"}, dep); err != nil {
 		return err
+	}
+
+	if !reflect.DeepEqual(ccm.Status.Conditions, dep.Status.Conditions) {
+		ccm.Status.Conditions = dep.Status.Conditions
+
+		err := r.Status().Update(ctx, ccm)
+		if err != nil {
+			log.Error(err, "Failed to update Memcached status")
+			return err
+		}
 	}
 
 	return nil
