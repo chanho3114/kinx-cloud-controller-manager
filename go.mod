@@ -14,7 +14,9 @@ require (
 )
 
 require (
+	github.com/blang/semver/v4 v4.0.0 // indirect
 	github.com/go-task/slim-sprig/v3 v3.0.0 // indirect
+	github.com/gobuffalo/flect v1.0.2 // indirect
 	github.com/matttproud/golang_protobuf_extensions/v2 v2.0.0 // indirect
 )
 

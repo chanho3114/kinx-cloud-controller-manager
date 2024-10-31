@@ -1,0 +1,12 @@
+apiVersion: crd.kinx.net/v1alpha1
+kind: KinxCloudControllerManager
+metadata:
+  name: ccm-test-cloud-cotroller-manager
+spec:
+  cluster_name: chanho-cluster
+  project_name: myproject
+  user_domain_name: domain1
+  auth_url: proxy-url.com
+  application_credential_id: abcdefg
+  application_credential_secret: gfedcba
+  use_octavia: true

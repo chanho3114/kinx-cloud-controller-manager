@@ -42,7 +42,7 @@ type KinxCloudControllerManagerSpec struct {
 type KinxCloudControllerManagerStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
-	Conditions []appsv1.DeploymentCondition
+	Conditions []appsv1.DeploymentCondition `json:"conditions"`
 }
 
 //+kubebuilder:object:root=true

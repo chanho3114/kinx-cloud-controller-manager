@@ -9,4 +9,4 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: kinx-cloud-controller-manager
-  namespace: chanho-test
+  namespace: chanho

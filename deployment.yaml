@@ -3,7 +3,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: kinx-cloud-controller-manager
-  namespace: chanho-test
+  namespace: chanho
 spec:
   selector:
     matchLabels:
@@ -48,7 +48,7 @@ spec:
       containers:
       - command:
         - /manager
-        image: kinx-cloud-controller-manager:latest
+        image: cyberguy61/kinx-cloud-controller-manager:latest
         name: manager
         securityContext:
           allowPrivilegeEscalation: false
