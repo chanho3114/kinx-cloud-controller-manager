@@ -36,7 +36,7 @@ import (
 
 	crdv1alpha1 "github.com/chanho3114/kinx-cloud-controller-manager/api/v1alpha1"
 	"github.com/chanho3114/kinx-cloud-controller-manager/internal/controller"
-	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
+	appsv1 "k8s.io/api/apps/v1"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -47,8 +47,8 @@ var (
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-	utilruntime.Must(clusterv1.AddToScheme(scheme))
 	utilruntime.Must(crdv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(appsv1.AddToScheme(scheme))
 	//+kubebuilder:scaffold:scheme
 }
 
@@ -126,6 +126,7 @@ func main() {
 	if err = (&controller.KinxCloudControllerManagerReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
+		Log:    ctrl.Log.WithName("controllers").WithName("KinxCloudControllerManager"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "KinxCloudControllerManager")
 		os.Exit(1)

@@ -90,3 +90,5 @@ rules:
   - patch
   - update
   - watch
+  - bind
+  - escalate

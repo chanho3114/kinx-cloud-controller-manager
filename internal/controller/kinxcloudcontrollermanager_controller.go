@@ -18,7 +18,6 @@ package controller
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"reflect"
 
@@ -26,13 +25,14 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	kerrors "k8s.io/apimachinery/pkg/util/errors"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	crdv1alpha1 "github.com/chanho3114/kinx-cloud-controller-manager/api/v1alpha1"
+	kinxutil "github.com/chanho3114/kinx-cloud-controller-manager/util"
+	"github.com/chanho3114/kinx-cloud-controller-manager/util/ssa"
 	"github.com/go-logr/logr"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -43,14 +43,18 @@ import (
 	"sigs.k8s.io/cluster-api/util/patch"
 )
 
-const kccmFinalizer = "github.com/chanho3114/kinx_cloud_controller_manager_finalizer"
-const KinxClusterNameLabel = "crd/kinx.net/cluster-name"
+const kccmFinalizer = "kinx.net/cloud-controller-manager-finalizer"
+const KinxClusterNameLabel = "kinx.net/cluster-name"
+const managerName = "kinx-cloud-controller-manager"
+
+type ccmReconcileFunc func(ctx context.Context, ccm *crdv1alpha1.KinxCloudControllerManager) (ctrl.Result, error)
 
 // KinxCloudControllerManagerReconciler reconciles a KinxCloudControllerManager object
 type KinxCloudControllerManagerReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
-	Log    logr.Logger
+	Scheme   *runtime.Scheme
+	Log      logr.Logger
+	ssaCache ssa.Cache
 }
 
 type ccmDescendants struct {
@@ -101,7 +105,10 @@ func (r *KinxCloudControllerManagerReconciler) Reconcile(ctx context.Context, re
 
 	defer func() {
 		log.Info("Status Reconcile")
-		r.updateStatus(ctx, ccm)
+		err := r.updateStatus(ctx, ccm)
+		if err != nil {
+			reterr = kerrors.NewAggregate([]error{reterr, err})
+		}
 
 		// Always attempt to Patch the Cluster object and status after each reconciliation.
 		// Patch ObservedGeneration only if the reconciliation completed successfully
@@ -125,140 +132,170 @@ func (r *KinxCloudControllerManagerReconciler) Reconcile(ctx context.Context, re
 		return r.reconcileDelete(ctx, ccm)
 	}
 
-	log.Info("Secret Reconcile")
-	err = r.reconcileSecret(ctx, ccm)
-	if err != nil {
-		return ctrl.Result{}, err
+	alwaysReconcile := []ccmReconcileFunc{
+		r.reconcileSecret,
+		r.reconcileServiceAccount,
+		r.reconcileRole,
+		r.reconcileRoleBinding,
+		r.reconcileDeployment,
 	}
 
-	log.Info("ServiceAccount Reconcile")
-	err = r.reconcileServiceAccount(ctx, ccm)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
-	log.Info("Role Reconcile")
-	err = r.reconcileRole(ctx, ccm)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
-	log.Info("RoleBinding Reconcile")
-	err = r.reconcileRoleBinding(ctx, ccm)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
-	log.Info("Deployment Reconcile")
-	err = r.reconcileDeployment(ctx, ccm)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
-	return ctrl.Result{}, nil
+	return doReconcile(ctx, alwaysReconcile, ccm)
 }
 
-func (r *KinxCloudControllerManagerReconciler) reconcileSecret(ctx context.Context, ccm *crdv1alpha1.KinxCloudControllerManager) error {
-	log := r.Log.WithValues("Secret", ccm.Namespace, ccm.Name)
+func (r *KinxCloudControllerManagerReconciler) reconcileSecret(ctx context.Context, ccm *crdv1alpha1.KinxCloudControllerManager) (ctrl.Result, error) {
+	log := r.Log.WithValues("Secret", types.NamespacedName{Namespace: ccm.Namespace, Name: ccm.Name})
+	/*
+		currentSecret := &corev1.Secret{}
 
+		if err := r.Get(ctx, types.NamespacedName{
+			Namespace: ccm.Namespace,
+			Name: fmt.Sprintf("%s-%s", ccm.Spec.ClusterName, "ccm-cloud-config"),
+			}, currentSecret); err != nil {
+			if !errors.IsNotFound(err) {
+				return ctrl.Result{}, err
+			}
+		}
+
+		// Initialize the patch helper.
+		patchHelper, err := patch.NewHelper(currentSecret, r.Client)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+
+		log.Info(currentSecret.String())
+	*/
+	data := `[Global]
+application-credential-id = "%s"
+application-credential-secret = "%s"
+auth-url = "%s"
+domain-name = "%s"
+tenant-name = "%s"
+
+[Networking]
+
+[LoadBalancer]
+use-octavia = "%t"
+
+[BlockStorage]
+
+[Metadata]
+
+[Route]
+`
 	// Secret 데이터를 생성
-	cloudConf := fmt.Sprintf(`
-        [Global]
-        application-credential-id = "%s"
-        application-credential-secret = "%s"
-        auth-url = "%s"
-        domain-name = "%s"
-        tenant-name = "%s"
+	desiredCloudConf := fmt.Sprintf(data, ccm.Spec.ApplicationCredentialID, ccm.Spec.ApplicationCredentialSecret, ccm.Spec.AuthURL, ccm.Spec.UserDomainName, ccm.Spec.ProjectName, ccm.Spec.UseOctavia)
 
-        [Networking]
-
-        [LoadBalancer]
-        use-octavia = "%t"
-
-        [BlockStorage]
-
-        [Metadata]
-
-        [Route]
-    `, ccm.Spec.ApplicationCredentialID, ccm.Spec.ApplicationCredentialSecret, ccm.Spec.AuthURL, ccm.Spec.UserDomainName, ccm.Spec.ProjectName, ccm.Spec.UseOctavia)
+	log.Info(desiredCloudConf)
 
 	// cloud.conf를 base64로 인코딩
-	encodedCloudConf := base64.StdEncoding.EncodeToString([]byte(cloudConf))
+	// encodedCloudConf := base64.StdEncoding.EncodeToString([]byte(cloudConf))
 
-	secret := &corev1.Secret{
+	desiredSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-%s", ccm.Spec.ClusterName, "ccm-cloud-config"),
 			Namespace: ccm.ObjectMeta.Namespace,
 			Labels: map[string]string{
 				KinxClusterNameLabel: ccm.Spec.ClusterName,
 			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion:         ccm.APIVersion,
+					Kind:               ccm.Kind,
+					Name:               ccm.Name,
+					UID:                ccm.UID,
+					Controller:         kinxutil.BoolPtr(false),
+					BlockOwnerDeletion: kinxutil.BoolPtr(false),
+				},
+			},
 		},
 		Data: map[string][]byte{
-			"cloud.conf": []byte(encodedCloudConf),
+			"cloud.conf": []byte(desiredCloudConf),
 		},
 		Type: corev1.SecretTypeOpaque,
 	}
 
-	controllerutil.SetOwnerReference(ccm, secret, r.Scheme, func(or *metav1.OwnerReference) {
-		// or.BlockOwnerDeletion = boolPtr(true)
-		// or.Controller = boolPtr(true)
-	})
-
-	result, err := controllerutil.CreateOrPatch(ctx, r.Client, secret, func() error {
-		return nil
-	})
-
-	if err != nil {
-		return fmt.Errorf("secret를 생성할 수 없습니다!: %v", err)
+	if err := ssa.Patch(ctx, r.Client, managerName, desiredSecret); err != nil {
+		return ctrl.Result{}, err
 	}
 
-	log.Info("Result : ", result)
-
-	return nil
+	return ctrl.Result{}, nil
 }
 
-func (r *KinxCloudControllerManagerReconciler) reconcileServiceAccount(ctx context.Context, ccm *crdv1alpha1.KinxCloudControllerManager) error {
-	log := r.Log.WithValues("ServiceAccount", ccm.Namespace, ccm.Name)
+func (r *KinxCloudControllerManagerReconciler) reconcileServiceAccount(ctx context.Context, ccm *crdv1alpha1.KinxCloudControllerManager) (ctrl.Result, error) {
+	log := r.Log.WithValues("ServiceAccount", types.NamespacedName{Namespace: ccm.Namespace, Name: ccm.Name})
+
+	currentServiceaccount := &corev1.ServiceAccount{}
+
+	// Initialize the patch helper.
+	patchHelper, err := patch.NewHelper(currentServiceaccount, r.Client)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	log.Info(currentServiceaccount.String())
 
 	// ServiceAccount 객체를 생성합니다.
-	serviceAccount := &corev1.ServiceAccount{
+	desiredServiceAccount := &corev1.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-%s", ccm.Spec.ClusterName, "cloud-controller-manager"),
 			Namespace: ccm.ObjectMeta.Namespace,
 			Labels: map[string]string{
 				KinxClusterNameLabel: ccm.Spec.ClusterName,
 			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion:         ccm.APIVersion,
+					Kind:               ccm.Kind,
+					Name:               ccm.Name,
+					UID:                ccm.UID,
+					Controller:         kinxutil.BoolPtr(true),
+					BlockOwnerDeletion: kinxutil.BoolPtr(false),
+				},
+			},
 		},
 	}
 
-	controllerutil.SetOwnerReference(ccm, serviceAccount, r.Scheme, func(or *metav1.OwnerReference) {
-		// or.BlockOwnerDeletion = boolPtr(true)
-		// or.Controller = boolPtr(true)
-	})
+	log.Info(desiredServiceAccount.String())
 
-	result, err := controllerutil.CreateOrPatch(ctx, r.Client, serviceAccount, func() error {
-		return nil
-	})
-
-	if err != nil {
-		return fmt.Errorf("serviceAccount를 생성할 수 없습니다!: %v", err)
+	patchOpts := []patch.Option{}
+	if err := patchHelper.Patch(ctx, desiredServiceAccount, patchOpts...); err != nil {
+		return ctrl.Result{}, err
 	}
 
-	log.Info("Result : ", result)
-
-	return nil
+	return ctrl.Result{}, nil
 }
 
-func (r *KinxCloudControllerManagerReconciler) reconcileRole(ctx context.Context, ccm *crdv1alpha1.KinxCloudControllerManager) error {
-	log := r.Log.WithValues("Role", ccm.Namespace, ccm.Name)
+func (r *KinxCloudControllerManagerReconciler) reconcileRole(ctx context.Context, ccm *crdv1alpha1.KinxCloudControllerManager) (ctrl.Result, error) {
+	log := r.Log.WithValues("Role", types.NamespacedName{Namespace: ccm.Namespace, Name: ccm.Name})
+
+	currentRole := &rbacv1.Role{}
+
+	// Initialize the patch helper.
+	patchHelper, err := patch.NewHelper(currentRole, r.Client)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	log.Info(currentRole.String())
 
 	// Role 객체 생성
-	role := &rbacv1.Role{
+	desiredRole := &rbacv1.Role{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-%s", ccm.Spec.ClusterName, "cloud-controller-manager"),
 			Namespace: ccm.Namespace,
 			Labels: map[string]string{
 				KinxClusterNameLabel: ccm.Spec.ClusterName,
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion:         ccm.APIVersion,
+					Kind:               ccm.Kind,
+					Name:               ccm.Name,
+					UID:                ccm.UID,
+					Controller:         kinxutil.BoolPtr(true),
+					BlockOwnerDeletion: kinxutil.BoolPtr(false),
+				},
 			},
 		},
 		Rules: []rbacv1.PolicyRule{
@@ -325,26 +362,28 @@ func (r *KinxCloudControllerManagerReconciler) reconcileRole(ctx context.Context
 		},
 	}
 
-	controllerutil.SetOwnerReference(ccm, role, r.Scheme, func(or *metav1.OwnerReference) {
-		// or.BlockOwnerDeletion = boolPtr(true)
-		// or.Controller = boolPtr(true)
-	})
+	log.Info(desiredRole.String())
 
-	result, err := controllerutil.CreateOrPatch(ctx, r.Client, role, func() error {
-		return nil
-	})
-
-	if err != nil {
-		return fmt.Errorf("role를 생성할 수 없습니다!: %v", err)
+	patchOpts := []patch.Option{}
+	if err := patchHelper.Patch(ctx, desiredRole, patchOpts...); err != nil {
+		return ctrl.Result{}, err
 	}
 
-	log.Info("Result : ", result)
-
-	return nil
+	return ctrl.Result{}, nil
 }
 
-func (r *KinxCloudControllerManagerReconciler) reconcileRoleBinding(ctx context.Context, ccm *crdv1alpha1.KinxCloudControllerManager) error {
-	log := r.Log.WithValues("Rolebinding", ccm.Namespace, ccm.Name)
+func (r *KinxCloudControllerManagerReconciler) reconcileRoleBinding(ctx context.Context, ccm *crdv1alpha1.KinxCloudControllerManager) (ctrl.Result, error) {
+	log := r.Log.WithValues("Rolebinding", types.NamespacedName{Namespace: ccm.Namespace, Name: ccm.Name})
+
+	currentRoleBinding := &rbacv1.RoleBinding{}
+
+	// Initialize the patch helper.
+	patchHelper, err := patch.NewHelper(currentRoleBinding, r.Client)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	log.Info(currentRoleBinding.String())
 
 	// RoleRef 정보
 	roleRef := rbacv1.RoleRef{
@@ -363,49 +402,71 @@ func (r *KinxCloudControllerManagerReconciler) reconcileRoleBinding(ctx context.
 	}
 
 	// RoleBinding 객체를 생성합니다.
-	roleBinding := &rbacv1.RoleBinding{
+	desiredRoleBinding := &rbacv1.RoleBinding{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-%s", ccm.Spec.ClusterName, "cloud-controller-manager"),
 			Namespace: ccm.Namespace,
 			Labels: map[string]string{
 				KinxClusterNameLabel: ccm.Spec.ClusterName,
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion:         ccm.APIVersion,
+					Kind:               ccm.Kind,
+					Name:               ccm.Name,
+					UID:                ccm.UID,
+					Controller:         kinxutil.BoolPtr(true),
+					BlockOwnerDeletion: kinxutil.BoolPtr(false),
+				},
 			},
 		},
 		RoleRef:  roleRef,
 		Subjects: subjects,
 	}
 
-	controllerutil.SetOwnerReference(ccm, roleBinding, r.Scheme, func(or *metav1.OwnerReference) {
-		// or.BlockOwnerDeletion = boolPtr(true)
-		// or.Controller = boolPtr(true)
-	})
+	log.Info(desiredRoleBinding.String())
 
-	result, err := controllerutil.CreateOrPatch(ctx, r.Client, roleBinding, func() error {
-		return nil
-	})
-
-	if err != nil {
-		return fmt.Errorf("rolebinding를 생성할 수 없습니다!: %v", err)
+	patchOpts := []patch.Option{}
+	if err := patchHelper.Patch(ctx, desiredRoleBinding, patchOpts...); err != nil {
+		return ctrl.Result{}, err
 	}
 
-	log.Info("Result : ", result)
-
-	return nil
+	return ctrl.Result{}, nil
 }
 
-func (r *KinxCloudControllerManagerReconciler) reconcileDeployment(ctx context.Context, ccm *crdv1alpha1.KinxCloudControllerManager) error {
-	log := r.Log.WithValues("Deployment", ccm.Namespace, ccm.Name)
+func (r *KinxCloudControllerManagerReconciler) reconcileDeployment(ctx context.Context, ccm *crdv1alpha1.KinxCloudControllerManager) (ctrl.Result, error) {
+	log := r.Log.WithValues("Deployment", types.NamespacedName{Namespace: ccm.Namespace, Name: ccm.Name})
 
-	deployment := &appsv1.Deployment{
+	currentDeployment := &appsv1.Deployment{}
+
+	// Initialize the patch helper.
+	patchHelper, err := patch.NewHelper(currentDeployment, r.Client)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	log.Info(currentDeployment.String())
+
+	desiredDeployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-%s", ccm.Spec.ClusterName, "cloud-controller-manager"),
 			Namespace: ccm.Namespace,
 			Labels: map[string]string{
 				KinxClusterNameLabel: ccm.Spec.ClusterName,
 			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion:         ccm.APIVersion,
+					Kind:               ccm.Kind,
+					Name:               ccm.Name,
+					UID:                ccm.UID,
+					Controller:         kinxutil.BoolPtr(true),
+					BlockOwnerDeletion: kinxutil.BoolPtr(false),
+				},
+			},
 		},
 		Spec: appsv1.DeploymentSpec{
-			Replicas: int32Ptr(1),
+			Replicas: kinxutil.Int32Ptr(1),
 			Selector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{"app": "kinx-cloud-controller-manager"},
 			},
@@ -459,7 +520,7 @@ func (r *KinxCloudControllerManagerReconciler) reconcileDeployment(ctx context.C
 						},
 					},
 					SecurityContext: &corev1.PodSecurityContext{
-						RunAsUser: int64Ptr(1001),
+						RunAsUser: kinxutil.Int64Ptr(1001),
 					},
 					ServiceAccountName: fmt.Sprintf("%s-%s", ccm.Spec.ClusterName, "cloud-controller-manager"),
 					Volumes: []corev1.Volume{
@@ -468,7 +529,7 @@ func (r *KinxCloudControllerManagerReconciler) reconcileDeployment(ctx context.C
 							VolumeSource: corev1.VolumeSource{
 								Secret: &corev1.SecretVolumeSource{
 									SecretName:  fmt.Sprintf("%s-%s", ccm.Spec.ClusterName, "ccm-cloud-config"),
-									DefaultMode: int32Ptr(420),
+									DefaultMode: kinxutil.Int32Ptr(420),
 								},
 							},
 						},
@@ -477,7 +538,7 @@ func (r *KinxCloudControllerManagerReconciler) reconcileDeployment(ctx context.C
 							VolumeSource: corev1.VolumeSource{
 								Secret: &corev1.SecretVolumeSource{
 									SecretName:  fmt.Sprintf("%s-%s", ccm.Spec.ClusterName, "admin-kubeconfig"),
-									DefaultMode: int32Ptr(420),
+									DefaultMode: kinxutil.Int32Ptr(420),
 								},
 							},
 						},
@@ -487,34 +548,32 @@ func (r *KinxCloudControllerManagerReconciler) reconcileDeployment(ctx context.C
 		},
 	}
 
-	controllerutil.SetOwnerReference(ccm, deployment, r.Scheme, func(or *metav1.OwnerReference) {
-		// or.BlockOwnerDeletion = boolPtr(true)
-		// or.Controller = boolPtr(true)
-	})
+	log.Info(desiredDeployment.String())
 
-	result, err := controllerutil.CreateOrPatch(ctx, r.Client, deployment, func() error {
-		return nil
-	})
-
-	if err != nil {
-		return fmt.Errorf("deployment를 생성할 수 없습니다!: %v", err)
+	patchOpts := []patch.Option{}
+	if err := patchHelper.Patch(ctx, desiredDeployment, patchOpts...); err != nil {
+		return ctrl.Result{}, err
 	}
 
-	log.Info("Result : ", result)
-
-	return nil
+	return ctrl.Result{}, nil
 }
 
 func (r *KinxCloudControllerManagerReconciler) updateStatus(ctx context.Context, ccm *crdv1alpha1.KinxCloudControllerManager) error {
-	// log := r.Log.WithValues("Status", ccm.Namespace, ccm.Name)
+	log := r.Log.WithValues("Status", types.NamespacedName{Namespace: ccm.Namespace, Name: ccm.Name})
 
 	dep := &appsv1.Deployment{}
 
-	if err := r.Get(ctx, types.NamespacedName{Namespace: ccm.Namespace, Name: ccm.Spec.ClusterName + "cloud-controller-manager"}, dep); err != nil {
+	if err := r.Get(ctx, types.NamespacedName{
+		Namespace: ccm.Namespace,
+		Name:      fmt.Sprintf("%s-%s", ccm.Spec.ClusterName, "cloud-controller-manager"),
+	}, dep); err != nil {
 		return err
 	}
 
+	log.Info("Current Deployment status", "Get", dep.Status.String())
+
 	if !reflect.DeepEqual(ccm.Status.Conditions, dep.Status.Conditions) {
+		log.Info("Desied Status와 다름")
 		ccm.Status.Conditions = dep.Status.Conditions
 
 		// err := r.Status().Update(ctx, ccm)
@@ -528,12 +587,39 @@ func (r *KinxCloudControllerManagerReconciler) updateStatus(ctx context.Context,
 }
 
 func (r *KinxCloudControllerManagerReconciler) reconcileDelete(_ context.Context, ccm *crdv1alpha1.KinxCloudControllerManager) (ctrl.Result, error) {
-	log := r.Log.WithValues("Delete Reconcile", ccm.Namespace, ccm.Name)
+	log := r.Log.WithValues("Delete Reconcile", types.NamespacedName{
+		Namespace: ccm.Namespace,
+		Name:      ccm.Name,
+	})
+
 	log.Info("removing application")
 
 	controllerutil.RemoveFinalizer(ccm, kccmFinalizer)
 
 	return ctrl.Result{}, nil
+}
+
+func doReconcile(ctx context.Context, funcs []ccmReconcileFunc, ccm *crdv1alpha1.KinxCloudControllerManager) (ctrl.Result, error) {
+	res := ctrl.Result{}
+	errs := []error{}
+
+	for _, reconcileFunc := range funcs {
+		// Call the inner reconciliation methods.
+		result, err := reconcileFunc(ctx, ccm)
+		if err != nil {
+			errs = append(errs, err)
+		}
+		if len(errs) > 0 {
+			continue
+		}
+		res = util.LowestNonZeroResult(res, result)
+	}
+
+	if len(errs) > 0 {
+		return ctrl.Result{}, kerrors.NewAggregate(errs)
+	}
+
+	return res, nil
 }
 
 func (r *KinxCloudControllerManagerReconciler) getDescendants(ctx context.Context, ccm *crdv1alpha1.KinxCloudControllerManager) (ccmDescendants, error) {
@@ -550,7 +636,7 @@ func (r *KinxCloudControllerManagerReconciler) getDescendants(ctx context.Contex
 	// Secret
 	if err := r.Get(ctx, types.NamespacedName{
 		Namespace: ccm.Namespace,
-		Name:      fmt.Sprintf("%s-%s", ccm.Spec.ClusterName, "cloud-controller-manager"),
+		Name:      fmt.Sprintf("%s-%s", ccm.Spec.ClusterName, "ccm-cloud-config"),
 	}, &descendants.secret); err != nil {
 		return descendants, err
 	}
@@ -621,22 +707,20 @@ func patchCloudControllerManager(ctx context.Context, patchHelper *patch.Helper,
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *KinxCloudControllerManagerReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	err := ctrl.NewControllerManagedBy(mgr).
 		For(&crdv1alpha1.KinxCloudControllerManager{}).
 		Owns(&appsv1.Deployment{}).
+		Owns(&corev1.Secret{}).
+		Owns(&corev1.ServiceAccount{}).
+		Owns(&rbacv1.Role{}).
+		Owns(&rbacv1.RoleBinding{}).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 10}).
 		Complete(r)
-}
+	if err != nil {
+		return err
+	}
 
-// helper functions for pointer types.
-func boolPtr(b bool) *bool {
-	return &b
-}
+	r.ssaCache = ssa.NewCache()
 
-func int32Ptr(i int) *int32 {
-	return ptr.To(int32(i))
-}
-
-func int64Ptr(i int) *int64 {
-	return ptr.To(int64(i))
+	return nil
 }

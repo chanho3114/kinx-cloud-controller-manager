@@ -1,7 +1,8 @@
 apiVersion: crd.kinx.net/v1alpha1
 kind: KinxCloudControllerManager
 metadata:
-  name: ccm-test-cloud-cotroller-manager
+  name: chanho-cluster-cloud-cotroller-manager
+  namespace: ccm-test
 spec:
   cluster_name: chanho-cluster
   project_name: myproject
