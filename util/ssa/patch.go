@@ -153,6 +153,11 @@ func prepareModified(scheme *runtime.Scheme, obj client.Object) (*unstructured.U
 			{"metadata", "finalizers"},
 			{"metadata", "ownerReferences"},
 			{"spec"},
+			{"rule"},
+			{"rules"},
+			{"subjects"},
+			{"roleRef"},
+			{"data"},
 		},
 	})
 	return u, nil
